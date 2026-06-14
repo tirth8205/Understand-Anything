@@ -20,6 +20,30 @@ const SCRIPT = resolve(
 );
 
 /**
+ * Hermetic git environment for every git/scanner subprocess these tests spawn.
+ *
+ * scan-project.mjs enumerates files via `git ls-files -co --exclude-standard`,
+ * which honors the host's `core.excludesFile` (the global gitignore). Many
+ * developers keep `.env` / `.env.local` in their global gitignore, so on those
+ * hosts the fixture's dotfiles never reach the scanner and tests that assert on
+ * them blow up with an opaque TypeError. CI (ubuntu-latest) has no global
+ * gitignore, so it never sees this — making the failure a frustrating
+ * works-on-CI-fails-locally trap. See #427.
+ *
+ * Nulling GIT_CONFIG_GLOBAL/SYSTEM is NOT enough: `core.excludesFile` defaults
+ * to $XDG_CONFIG_HOME/git/ignore (or ~/.config/git/ignore) even with no config
+ * file present, so the knob itself must be overridden to /dev/null.
+ */
+const HERMETIC_GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.excludesFile',
+  GIT_CONFIG_VALUE_0: '/dev/null',
+};
+
+/**
  * Build a project tree from a `{ relPath: contents }` object. Creates parent
  * directories as needed. Initializes a real git repo so the script's preferred
  * `git ls-files` enumeration path is exercised — tests that need the walker
@@ -36,7 +60,11 @@ function setupTree(files, { gitInit = true } = {}) {
     // `git ls-files -co --exclude-standard` returns BOTH cached and others
     // (modulo gitignore), so an `add` is unnecessary for our tests — the
     // bare repo init is enough for ls-files to enumerate.
-    const init = spawnSync('git', ['init', '-q'], { cwd: root, encoding: 'utf-8' });
+    const init = spawnSync('git', ['init', '-q'], {
+      cwd: root,
+      encoding: 'utf-8',
+      env: HERMETIC_GIT_ENV,
+    });
     if (init.status !== 0) {
       // CI without git: continue without it; the walker fallback will fire.
     }
@@ -66,6 +94,7 @@ function runScript(projectRoot) {
   const outputPath = join(outputDir, 'scan-output.json');
   const result = spawnSync('node', [SCRIPT, projectRoot, outputPath], {
     encoding: 'utf-8',
+    env: HERMETIC_GIT_ENV,
   });
   let output = null;
   try {
@@ -390,14 +419,22 @@ describe('scan-project.mjs — category assignment (project-scanner.md Step 4)',
   // configs were falling through to `code` / `unknown`. Caught by Codex
   // review on PR #204.
   it('dotfile configs (.env, .env.local, .env.production) map to config + env language', () => {
+    // A non-ignored sibling (index.ts) guarantees `git ls-files` returns a
+    // non-empty list, so the scanner uses the git enumeration path rather
+    // than silently falling back to the recursive walker (which would mask
+    // a global-gitignore leak by re-including the dotfiles). See #427.
     projectRoot = setupTree({
       '.env': 'API_KEY=abc\n',
       '.env.local': 'LOCAL=1\n',
       '.env.production': 'PROD=1\n',
+      'index.ts': 'export const x = 1;\n',
     });
     const r = runScript(projectRoot);
     expect(r.status).toBe(0);
     for (const p of ['.env', '.env.local', '.env.production']) {
+      // Guard before dereference: a leaked host global gitignore that drops
+      // .env would otherwise surface as an opaque TypeError here (#427).
+      expect(byPath(r.output, p)).toBeDefined();
       expect(byPath(r.output, p).fileCategory).toBe('config');
       // LANGUAGE_BY_EXT['.env'] -> 'config' (the language id itself; not
       // a typo — the language for env files is the 'config' bucket).
