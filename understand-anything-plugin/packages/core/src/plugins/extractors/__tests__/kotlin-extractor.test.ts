@@ -161,6 +161,24 @@ fun three(): String = ""
       tree.delete();
       parser.delete();
     });
+
+    it("collects methods declared inside an enum class body", () => {
+      // An `enum class` body parses as `enum_class_body`, not `class_body`,
+      // so members declared inside it must still be collected.
+      const { tree, parser, root } = parse(`enum class Direction {
+    NORTH, SOUTH;
+    fun opposite(): Direction = NORTH
+}
+`);
+      const result = extractor.extractStructure(root);
+
+      expect(result.classes[0].name).toBe("Direction");
+      expect(result.classes[0].methods).toContain("opposite");
+      expect(result.functions.map((f) => f.name)).toContain("opposite");
+
+      tree.delete();
+      parser.delete();
+    });
   });
 
   describe("extractStructure - interfaces", () => {
