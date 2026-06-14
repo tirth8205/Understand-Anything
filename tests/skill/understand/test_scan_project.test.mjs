@@ -20,6 +20,29 @@ const SCRIPT = resolve(
 );
 
 /**
+ * Hermetic git environment for the fixture repos and the scanner subprocess.
+ *
+ * scan-project.mjs enumerates files via `git ls-files -co --exclude-standard`,
+ * which honors the host's `core.excludesFile` (the global/system gitignore).
+ * Many contributors keep `.env` / `.env.local` in their global gitignore, which
+ * would silently strip those fixtures before the scanner ever sees them and make
+ * the dotfile-config test crash with `Cannot read properties of undefined`
+ * (see #427). Nulling GIT_CONFIG_GLOBAL/SYSTEM alone is NOT enough: with no
+ * config file, git still defaults `core.excludesFile` to
+ * `$XDG_CONFIG_HOME/git/ignore` (or `~/.config/git/ignore`), so the knob itself
+ * must be pinned to /dev/null. Passing this env to BOTH the `git init` and the
+ * scanner subprocess keeps the tests independent of the host's global ignore.
+ */
+const HERMETIC_GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'core.excludesFile',
+  GIT_CONFIG_VALUE_0: '/dev/null',
+};
+
+/**
  * Build a project tree from a `{ relPath: contents }` object. Creates parent
  * directories as needed. Initializes a real git repo so the script's preferred
  * `git ls-files` enumeration path is exercised — tests that need the walker
@@ -36,7 +59,11 @@ function setupTree(files, { gitInit = true } = {}) {
     // `git ls-files -co --exclude-standard` returns BOTH cached and others
     // (modulo gitignore), so an `add` is unnecessary for our tests — the
     // bare repo init is enough for ls-files to enumerate.
-    const init = spawnSync('git', ['init', '-q'], { cwd: root, encoding: 'utf-8' });
+    const init = spawnSync('git', ['init', '-q'], {
+      cwd: root,
+      encoding: 'utf-8',
+      env: HERMETIC_GIT_ENV,
+    });
     if (init.status !== 0) {
       // CI without git: continue without it; the walker fallback will fire.
     }
@@ -66,6 +93,7 @@ function runScript(projectRoot) {
   const outputPath = join(outputDir, 'scan-output.json');
   const result = spawnSync('node', [SCRIPT, projectRoot, outputPath], {
     encoding: 'utf-8',
+    env: HERMETIC_GIT_ENV,
   });
   let output = null;
   try {
